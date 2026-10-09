@@ -1,0 +1,11 @@
+PREDICTIVE MAINTENANCE MODEL EVALUATION
+Accuracy: 0.9952
+Precision: 0.8927
+Recall: 0.8398
+F1-score: 0.8654
+PR-AUC: 0.9439
+ROC-AUC: 0.9989
+True Positives: 3401
+True Negatives: 217041
+False Positives: 409
+False Negatives: 649
