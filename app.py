@@ -6,9 +6,59 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+# from supabase import create_client
+
+from predict_uploaded_csv import predict_uploaded_csv
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 RESULTS_DIR = BASE_DIR / "results"
+
+LIVE_PREDICTIONS_DIR = BASE_DIR / "outputs" / "live_predictions"
+
+
+@st.cache_resource
+def get_supabase_client():
+    client = create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"]
+    )
+
+    client.auth.sign_in_with_password({
+        "email": st.secrets["SUPABASE_EMAIL"],
+        "password": st.secrets["SUPABASE_PASSWORD"]
+    })
+
+    return client
+
+
+@st.cache_data(ttl=30)
+def load_supabase_predictions():
+    client = get_supabase_client()
+
+    response = (
+        client.table("maintenance_predictions")
+        .select("*")
+        .order("recorded_at", desc=True)
+        .limit(1000)
+        .execute()
+    )
+
+    return pd.DataFrame(response.data)
+
+
+@st.cache_data(ttl=30)
+def load_supabase_machines():
+    client = get_supabase_client()
+
+    response = (
+        client.table("machines")
+        .select("*")
+        .order("machine_id")
+        .execute()
+    )
+
+    return pd.DataFrame(response.data)
 
 st.set_page_config(
     page_title="Predictive Maintenance | Factory Intelligence",
@@ -117,6 +167,39 @@ def load_data():
 
 predictions, telemetry, machines, maintenance, failures, errors = load_data()
 
+
+def load_live_predictions():
+    files = sorted(LIVE_PREDICTIONS_DIR.glob("part-*.csv"))
+
+    if not files:
+        return pd.DataFrame()
+
+    frames = [pd.read_csv(file) for file in files]
+    live = pd.concat(frames, ignore_index=True)
+
+    live.columns = live.columns.str.strip()
+    live["datetime"] = pd.to_datetime(
+        live["datetime"], errors="coerce", utc=True
+    )
+    live["machineID"] = pd.to_numeric(
+        live["machineID"], errors="coerce"
+    )
+    live["failure_probability"] = pd.to_numeric(
+        live["failure_probability"], errors="coerce"
+    )
+
+    live = live.dropna(
+        subset=["machineID", "datetime", "failure_probability"]
+    )
+
+    if "risk_level" in live.columns:
+        live["risk_level"] = live["risk_level"].astype(str).str.upper()
+
+    return live
+
+
+live_predictions = load_live_predictions()
+
 if predictions.empty:
     st.error("The prediction file contains no usable records.")
     st.stop()
@@ -158,8 +241,8 @@ with st.sidebar:
 
     st.divider()
     st.write("**Project pipeline**")
-    st.write("Historical data → Spark ML predictions → Dashboard")
-    st.caption("Kafka, Hive, and live streaming can be integrated in the next phase.")
+    st.write("Machine sensor data → HDFS / Supabase Storage → Apache Spark processing → Random Forest failure prediction → Streamlit Dashboard")
+    st.caption("Kafka is used to demonstrate sensor data streaming. The dashboard displays machine risk levels, machinery history, maintenance priorities, and model evaluation results.")
 
 latest_predictions = (
     predictions.sort_values("datetime")
@@ -204,13 +287,17 @@ st.caption(
     else "Prediction window unavailable"
 )
 
-tab_overview, tab_monitor, tab_history, tab_schedule, tab_model = st.tabs([
+
+
+tab_overview, tab_monitor, tab_history, tab_schedule, tab_live, tab_model = st.tabs([
     "Factory Overview",
     "Machine Monitoring",
     "Machinery History",
     "Maintenance Priorities",
+    "Kafka Predictions",
     "Model Results"
 ])
+
 
 with tab_overview:
     st.subheader("Factory Overview")
@@ -386,6 +473,56 @@ with tab_monitor:
             st.warning("No telemetry records were found for this machine.")
     else:
         st.warning("The telemetry dataset is unavailable.")
+    
+    st.divider()
+    st.subheader("Upload CSV for Machine Risk Prediction")
+
+    uploaded_csv = st.file_uploader(
+        "Upload machine sensor data (CSV)",
+        type=["csv"],
+        key="uploaded_maintenance_csv"
+    )
+
+    if uploaded_csv is not None:
+        st.caption(
+            "Required columns: datetime, machineID, volt, rotate, "
+            "pressure, vibration"
+        )
+
+        if st.button("Predict Machine Risk", key="predict_uploaded_csv"):
+            try:
+                with st.spinner("Predicting machine maintenance risk..."):
+                    uploaded_predictions = predict_uploaded_csv(uploaded_csv)
+
+                st.success("Prediction completed successfully.")
+
+                st.dataframe(
+                    uploaded_predictions,
+                    width="stretch",
+                    hide_index=True
+                )
+
+                risk_counts = (
+                    uploaded_predictions["risk_level"]
+                    .value_counts()
+                    .reindex(["HIGH", "MEDIUM", "LOW"], fill_value=0)
+                )
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("High Risk", int(risk_counts["HIGH"]))
+                c2.metric("Medium Risk", int(risk_counts["MEDIUM"]))
+                c3.metric("Low Risk", int(risk_counts["LOW"]))
+
+                st.download_button(
+                    "Download Prediction Results",
+                    data=uploaded_predictions.to_csv(index=False).encode("utf-8"),
+                    file_name="uploaded_machine_risk_predictions.csv",
+                    mime="text/csv"
+                )
+
+            except Exception as error:
+                st.error(f"Prediction failed: {error}")
+
 
 with tab_history:
     st.subheader("Machinery History")
@@ -431,11 +568,12 @@ with tab_history:
                 f"available records."
             )
 
+
 with tab_schedule:
-    st.subheader("Maintenance Priorities")
+    st.subheader("Predictive Maintenance Schedule")
     st.write(
-        "Prioritize machines by predicted failure probability. "
-        "These are model-based recommendations, not confirmed mechanical faults."
+        "Proposed maintenance dates are generated from predicted failure risk. "
+        "They are recommendations, not confirmed factory bookings."
     )
 
     schedule = latest_predictions.sort_values(
@@ -466,17 +604,90 @@ with tab_schedule:
                 how="left"
             )
 
+    schedule["risk_level"] = (
+        schedule["risk_level"].astype(str).str.upper()
+    )
+
     schedule["recommended_action"] = schedule["risk_level"].map({
-        "High": "Inspect first and plan urgent maintenance",
-        "Medium": "Schedule inspection and monitor sensors",
-        "Low": "Continue routine preventive maintenance"
-    })
+        "HIGH": "Urgent inspection and maintenance assessment",
+        "MEDIUM": "Preventive inspection",
+        "LOW": "Routine inspection and continued monitoring"
+    }).fillna("Inspect machine and review risk")
+
+    schedule["priority_order"] = schedule["risk_level"].map({
+        "HIGH": 1,
+        "MEDIUM": 2,
+        "LOW": 3
+    }).fillna(4)
+
+    schedule = schedule.sort_values(
+        ["priority_order", "failure_probability"],
+        ascending=[True, False]
+    ).reset_index(drop=True)
+
+    schedule["schedule_date"] = ""
+    schedule["schedule_slot"] = ""
+
+    slot_hours = ["09:00–10:00", "10:00–11:00", "11:00–12:00",
+                  "13:00–14:00", "14:00–15:00", "15:00–16:00"]
+
+    today = pd.Timestamp.today().normalize()
+    day_offset = 0
+    slot_index = 0
+
+    for i in schedule.index:
+        risk = schedule.at[i, "risk_level"]
+
+        if risk == "HIGH":
+            earliest_day = 0
+        elif risk == "MEDIUM":
+            earliest_day = 1
+        else:
+            earliest_day = 3
+
+        day_offset = max(day_offset, earliest_day)
+
+        if slot_index >= len(slot_hours):
+            day_offset += 1
+            slot_index = 0
+
+        while (today + pd.Timedelta(days=day_offset)).weekday() >= 5:
+            day_offset += 1
+
+        schedule.at[i, "schedule_date"] = (
+            today + pd.Timedelta(days=day_offset)
+        ).strftime("%Y-%m-%d")
+
+        schedule.at[i, "schedule_slot"] = slot_hours[slot_index]
+
+        slot_index += 1
+
+    schedule["schedule_status"] = "Proposed"
+
+    st.caption(
+        "Scheduling assumptions: one machine per time slot, six slots per "
+        "working day, weekends skipped. Actual availability is not verified."
+    )
+
+    total_machines = schedule["machineID"].nunique()
+    high_count = (schedule["risk_level"] == "HIGH").sum()
+    medium_count = (schedule["risk_level"] == "MEDIUM").sum()
+    low_count = (schedule["risk_level"] == "LOW").sum()
+
+    metric1, metric2, metric3, metric4 = st.columns(4)
+    metric1.metric("Machines", total_machines)
+    metric2.metric("High Risk", int(high_count))
+    metric3.metric("Medium Risk", int(medium_count))
+    metric4.metric("Low Risk", int(low_count))
 
     schedule_display_columns = [
         "machineID",
         "risk_level",
         "failure_probability",
-        "recommended_action"
+        "schedule_date",
+        "schedule_slot",
+        "recommended_action",
+        "schedule_status"
     ]
 
     for col in [
@@ -497,7 +708,10 @@ with tab_schedule:
         "machineID": "Machine ID",
         "risk_level": "Risk Level",
         "failure_probability": "Failure Risk (%)",
+        "schedule_date": "Recommended Date",
+        "schedule_slot": "Proposed Time Slot",
         "recommended_action": "Recommended Action",
+        "schedule_status": "Schedule Status",
         "model": "Machine Model",
         "age": "Machine Age",
         "last_maintenance_date": "Last Maintenance",
@@ -507,11 +721,153 @@ with tab_schedule:
     st.dataframe(schedule_view, width="stretch", hide_index=True)
 
     st.download_button(
-        "Download Maintenance Priority CSV",
+        "Download Maintenance Schedule CSV",
         data=schedule_view.to_csv(index=False).encode("utf-8"),
-        file_name="maintenance_priorities.csv",
+        file_name="predictive_maintenance_schedule.csv",
         mime="text/csv"
     )
+
+
+with tab_live:
+    st.subheader("Kafka Sensor Stream Predictions")
+
+    if live_predictions.empty:
+        st.warning(
+            "No saved Kafka predictions found. Run the prediction pipeline first."
+        )
+    else:
+        total_records = len(live_predictions)
+        total_machines = live_predictions["machineID"].nunique()
+        
+        
+        live_predictions["risk_level"] = live_predictions[
+            "failure_probability"
+        ].apply(
+            lambda p: (
+                "HIGH"
+                if p >= high_threshold
+                else "MEDIUM"
+                if p >= medium_threshold
+                else "LOW"
+            )
+        )
+
+        high_count = int(
+            (live_predictions["risk_level"] == "HIGH").sum()
+        )
+        medium_count = int(
+            (live_predictions["risk_level"] == "MEDIUM").sum()
+        )
+        low_count = int(
+            (live_predictions["risk_level"] == "LOW").sum()
+        )
+
+        
+        # live_predictions["risk_level"] = live_predictions["failure_probability"].apply(
+        # lambda p: ("HIGH" if p >= high_threshold else "MEDIUM" if p >= medium_threshold else "LOW")
+
+        # high_count = int((live_predictions["risk_level"] == "HIGH").sum())
+        # medium_count = int((live_predictions["risk_level"] == "MEDIUM").sum())
+        # low_count = int((live_predictions["risk_level"] == "LOW").sum())
+
+        # )
+        # k1, k2, k3, k4 = st.columns(4)
+        # k1.metric("Sensor Records Scored", f"{total_records:,}")
+        # k2.metric("Machines Represented", f"{total_machines:,}")
+        # k3.metric("High-Risk Records", f"{high_count:,}")
+        # k4.metric("Medium-Risk Records", f"{medium_count:,}")
+
+        st.caption(
+            "These results are predictions from the saved Kafka sensor replay. "
+            "They do not represent continuous live factory monitoring."
+        )
+
+        risk_counts = pd.DataFrame({
+            "Risk Level": ["HIGH", "MEDIUM", "LOW"],
+            "Records": [high_count, medium_count, low_count]
+        })
+
+        left, right = st.columns(2)
+
+        with left:
+            fig = px.pie(
+                risk_counts,
+                names="Risk Level",
+                values="Records",
+                title="Predicted Risk Distribution",
+                hole=0.5,
+                color="Risk Level",
+                color_discrete_map={
+                    "HIGH": "#E45756",
+                    "MEDIUM": "#F2A541",
+                    "LOW": "#3A9D78"
+                }
+            )
+            st.plotly_chart(fig, width="stretch")
+
+        with right:
+            st.markdown("**Highest-Risk Sensor Records**")
+
+            top_risks = live_predictions.sort_values(
+                "failure_probability", ascending=False
+            ).head(10).copy()
+
+            top_risks["failure_probability"] = (
+                top_risks["failure_probability"] * 100
+            ).round(2)
+
+            st.dataframe(
+                top_risks[
+                    [
+                        "machineID",
+                        "datetime",
+                        "predicted_failure",
+                        "failure_probability",
+                        "risk_level"
+                    ]
+                ].rename(columns={
+                    "machineID": "Machine ID",
+                    "datetime": "Timestamp",
+                    "predicted_failure": "Predicted Failure",
+                    "failure_probability": "Failure Probability (%)",
+                    "risk_level": "Risk Level"
+                }),
+                width="stretch",
+                hide_index=True
+            )
+
+        st.markdown("**All Scored Sensor Records**")
+
+        display_live = live_predictions.sort_values(
+            "failure_probability", ascending=False
+        ).copy()
+
+        display_live["failure_probability"] = (
+            display_live["failure_probability"] * 100
+        ).round(2)
+
+        st.dataframe(
+            display_live.rename(columns={
+                "machineID": "Machine ID",
+                "datetime": "Timestamp",
+                "volt": "Voltage",
+                "rotate": "Rotation",
+                "pressure": "Pressure",
+                "vibration": "Vibration",
+                "predicted_failure": "Predicted Failure",
+                "failure_probability": "Failure Probability (%)",
+                "risk_level": "Risk Level"
+            }),
+            width="stretch",
+            hide_index=True
+        )
+
+        st.download_button(
+            "Download Kafka Predictions CSV",
+            data=live_predictions.to_csv(index=False).encode("utf-8"),
+            file_name="kafka_maintenance_predictions.csv",
+            mime="text/csv"
+        )
 
 with tab_model:
     st.subheader("Model Evaluation")
@@ -549,3 +905,5 @@ st.caption(
     "Manufacturing Predictive Maintenance | Initial dashboard using historical "
     "dataset predictions. Streaming integration is a future project phase."
 )
+
+
