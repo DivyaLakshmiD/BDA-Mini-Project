@@ -30,3 +30,5 @@ models/predictive_maintenance_rf/
 # Python virtual environment
 .venv/
 venv/
+# Supabase credentials
+.streamlit/secrets.toml
