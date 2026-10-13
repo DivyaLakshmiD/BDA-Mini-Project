@@ -32,3 +32,11 @@ models/predictive_maintenance_rf/
 venv/
 # Supabase credentials
 .streamlit/secrets.toml
+
+# Generated streaming outputs and checkpoints
+outputs/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
