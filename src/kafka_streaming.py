@@ -13,7 +13,7 @@ from pyspark.sql.types import (
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = PROJECT_DIR / "outputs" / "live_sensor_stream"
-CHECKPOINT_DIR = PROJECT_DIR / "outputs" / "kafka_json_checkpoint"
+CHECKPOINT_DIR = PROJECT_DIR / "outputs" / "kafka_json_checkpoint_v2"
 
 KAFKA_SERVER = "localhost:9092"
 TOPIC_NAME = "machine-sensor-stream"

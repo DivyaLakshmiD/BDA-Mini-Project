@@ -70,12 +70,22 @@ def predict_uploaded_csv(uploaded_file):
                 f"Saved model not found: {MODEL_DIR}"
             )
 
+        
         spark = (
             SparkSession.builder
             .appName("BDA_Uploaded_CSV_Predictions")
-            .master("local[*]")
+            .master("local[2]")
+            .config("spark.ui.enabled", "false")
+            .config(
+                "spark.driver.extraJavaOptions",
+                "-Dhadoop.home.dir=C:/hadoop"
+            )
+            .config("spark.hadoop.fs.file.impl.disable.cache", "true")
             .getOrCreate()
         )
+
+        spark._jvm.java.lang.System.load("C:/hadoop/bin/hadoop.dll")
+
         spark.sparkContext.setLogLevel("WARN")
 
         
