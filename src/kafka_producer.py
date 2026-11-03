@@ -1,24 +1,18 @@
-
-import csv
+﻿import csv
 import json
 import time
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
+
 from kafka import KafkaProducer
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DATA_FILE = PROJECT_DIR / "data" / "PdM_telemetry.csv"
-PREDICTIONS_FILE = PROJECT_DIR / "results" / "test_predictions.csv"
 KAFKA_SERVER = "localhost:9092"
 TOPIC_NAME = "machine-sensor-stream"
-
-RISK_TARGETS = {
-    "LOW": 240,
-    "MEDIUM": 40,
-    "HIGH": 20
-}
-
-DELAY_SECONDS = 0.02
+DELAY_SECONDS = 0.05
+MACHINE_COUNT = 10
+RECORDS_PER_MACHINE = 10
 
 
 def main():
@@ -27,109 +21,49 @@ def main():
         "rotate", "pressure", "vibration"
     }
 
-    risk_records = defaultdict(list)
+    selected = defaultdict(list)
 
-    with PREDICTIONS_FILE.open(
-        "r", newline="", encoding="utf-8-sig"
-    ) as file:
-        for row in csv.DictReader(file):
-            probability = json.loads(row["probability"])[1]
-
-            if probability >= 0.70:
-                risk = "HIGH"
-            elif probability >= 0.40:
-                risk = "MEDIUM"
-            else:
-                risk = "LOW"
-
-            risk_records[risk].append({
-                "machineID": int(row["machineID"]),
-                "datetime": row["datetime"],
-                "probability": probability
-            })
-
-    selected_keys = {}
-
-    for risk, target in RISK_TARGETS.items():
-        records = risk_records[risk]
-
-        if risk == "LOW":
-            records.sort(key=lambda row: row["probability"])
-        elif risk == "MEDIUM":
-            records.sort(
-                key=lambda row: abs(row["probability"] - 0.55)
-            )
-        else:
-            records.sort(
-                key=lambda row: row["probability"],
-                reverse=True
-            )
-
-        chosen = []
-        chosen_keys = set()
-        used_machines = set()
-
-        for row in records:
-            key = (row["machineID"], row["datetime"])
-
-            if row["machineID"] not in used_machines:
-                chosen.append(row)
-                chosen_keys.add(key)
-                used_machines.add(row["machineID"])
-
-            if len(chosen) >= target:
-                break
-
-        for row in records:
-            key = (row["machineID"], row["datetime"])
-
-            if len(chosen) >= target:
-                break
-
-            if key not in chosen_keys:
-                chosen.append(row)
-                chosen_keys.add(key)
-
-        if len(chosen) < target:
-            raise RuntimeError(
-                f"Not enough {risk} records: "
-                f"needed {target}, found {len(chosen)}"
-            )
-
-        for row in chosen:
-            key = (row["machineID"], row["datetime"])
-            selected_keys[key] = risk
-
-    events = []
-
-    with DATA_FILE.open(
-        "r", newline="", encoding="utf-8-sig"
-    ) as file:
+    with DATA_FILE.open("r", newline="", encoding="utf-8-sig") as file:
         reader = csv.DictReader(file)
 
-        if not reader.fieldnames or not required_columns.issubset(
-            reader.fieldnames
-        ):
+        if not reader.fieldnames or not required_columns.issubset(reader.fieldnames):
             raise ValueError("Unexpected telemetry dataset columns.")
 
         for row in reader:
-            key = (int(row["machineID"]), row["datetime"])
+            machine_id = int(row["machineID"])
 
-            if key in selected_keys:
-                events.append({
+            if machine_id not in range(1, MACHINE_COUNT + 1):
+                continue
+
+            if len(selected[machine_id]) < RECORDS_PER_MACHINE:
+                selected[machine_id].append({
                     "datetime": row["datetime"],
-                    "machineID": int(row["machineID"]),
+                    "machineID": machine_id,
                     "volt": float(row["volt"]),
                     "rotate": float(row["rotate"]),
                     "pressure": float(row["pressure"]),
                     "vibration": float(row["vibration"])
                 })
 
-    if len(events) != sum(RISK_TARGETS.values()):
-        raise RuntimeError(
-            f"Expected {sum(RISK_TARGETS.values())} events, "
-            f"but matched {len(events)}."
-        )
+            if all(
+                len(selected[machine]) == RECORDS_PER_MACHINE
+                for machine in range(1, MACHINE_COUNT + 1)
+            ):
+                break
+
+    missing = [
+        machine for machine in range(1, MACHINE_COUNT + 1)
+        if len(selected[machine]) < RECORDS_PER_MACHINE
+    ]
+
+    if missing:
+        raise RuntimeError(f"Insufficient records for machines: {missing}")
+
+    events = [
+        selected[machine][index]
+        for index in range(RECORDS_PER_MACHINE)
+        for machine in range(1, MACHINE_COUNT + 1)
+    ]
 
     producer = KafkaProducer(
         bootstrap_servers=KAFKA_SERVER,
@@ -138,21 +72,28 @@ def main():
         retries=5
     )
 
+    sent = 0
+
     try:
-        for index, event in enumerate(events, start=1):
+        for event in events:
             producer.send(TOPIC_NAME, value=event).get(timeout=30)
+            sent += 1
             print(
-                f"Sent {index}/{len(events)}: "
-                f"Machine {event['machineID']} "
-                f"at {event['datetime']}"
+                f"Sent {sent}/{len(events)}: Machine "
+                f"{event['machineID']} at {event['datetime']}",
+                flush=True
             )
             time.sleep(DELAY_SECONDS)
+
+        print(f"\nBatch completed. Total events sent: {sent}")
+        print("Expected: 10 events per machine across Machines 1–10.")
+
+    except KeyboardInterrupt:
+        print("\nSensor replay stopped by user.")
+
     finally:
         producer.flush()
         producer.close()
-
-    print(f"\nTotal messages sent: {len(events)}")
-    print("Selected risk targets:", RISK_TARGETS)
 
 
 if __name__ == "__main__":

@@ -204,17 +204,81 @@ if predictions.empty:
     st.error("The prediction file contains no usable records.")
     st.stop()
 
-st.title("⚙️ Factory Intelligence")
-st.subheader("Predictive Maintenance Monitoring System")
 
-st.caption(
-    "Machine failure risk monitoring, equipment history, and maintenance prioritization"
+st.title("🏭 Manufacturing Predictive Maintenance")
+st.subheader("Machine Intelligence & Failure Risk Monitoring")
+
+st.markdown(
+    """
+    Monitor machine health, identify equipment at risk, and support
+    proactive maintenance decisions using sensor analytics and a
+    Spark ML Random Forest model.
+    """
 )
 
-st.info(
-    "This first version displays historical test-set predictions from your trained "
-    "Spark ML model. It is not a live sensor-stream dashboard yet."
+st.markdown(
+    """
+    <style>
+    .portal-banner {
+        padding: 22px;
+        border-radius: 14px;
+        background: linear-gradient(120deg, #102a43, #176b87, #20a39e);
+        color: white;
+        margin: 12px 0 22px 0;
+    }
+    .portal-banner h3 {
+        color: white;
+        margin: 0 0 8px 0;
+    }
+    .portal-banner p {
+        color: white;
+        margin: 0;
+    }
+    </style>
+    <div class="portal-banner">
+        <h3>Predict. Prevent. Maintain.</h3>
+        <p>
+        A big-data predictive maintenance system using machine sensor
+        streams, Apache Spark ML, Kafka, Supabase, and Grafana.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
 )
+
+metric_columns = st.columns(4)
+metric_columns[0].metric("Model Accuracy", "99.52%")
+metric_columns[1].metric("Precision", "89.27%")
+metric_columns[2].metric("Recall", "83.98%")
+metric_columns[3].metric("F1-score", "86.54%")
+
+st.markdown("### Big-Data Processing Architecture")
+
+st.markdown(
+    """
+    **Sensor Dataset → HDFS → Apache Spark → Spark ML Random Forest
+    → Kafka Stream → Supabase PostgreSQL → Grafana Dashboard**
+    """
+)
+
+grafana_col, info_col = st.columns([1, 2])
+
+with grafana_col:
+    st.link_button(
+        "Open Grafana Monitoring ↗",
+        "http://localhost:3000",
+        use_container_width=True
+    )
+
+with info_col:
+    st.caption(
+        "Open your existing Grafana dashboard to explore machine risk, "
+        "sensor trends, failure probabilities, and high-risk equipment. "
+        "Grafana must be running on this computer."
+    )
+
+st.divider()
+
 
 with st.sidebar:
     st.header("Dashboard Settings")
@@ -222,18 +286,20 @@ with st.sidebar:
 
     high_threshold = st.slider(
         "High-risk threshold",
-        min_value=0.10,
-        max_value=0.90,
-        value=0.50,
-        step=0.05
+        min_value=0.001,
+        max_value=0.10,
+        value=0.01,
+        step=0.001,
+        format="%.3f"
     )
 
     medium_threshold = st.slider(
         "Medium-risk threshold",
-        min_value=0.01,
-        max_value=0.80,
-        value=0.20,
-        step=0.05
+        min_value=0.0005,
+        max_value=0.05,
+        value=0.003,
+        step=0.0005,
+        format="%.4f"
     )
 
     if medium_threshold >= high_threshold:
@@ -251,7 +317,7 @@ latest_predictions = (
 )
 
 if medium_threshold >= high_threshold:
-    medium_threshold = max(0.01, high_threshold - 0.05)
+    medium_threshold = max(0.0005, high_threshold - 0.0005)
 
 def risk_level(probability):
     if probability >= high_threshold:
